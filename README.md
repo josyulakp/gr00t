@@ -29,6 +29,14 @@
 python scripts/gr00t_finetune.py --dataset-path /mnt/data/franka_lerobot_dataset/ --embodiment-tag new_embodiment --data-config so100 --output-dir /mnt/data/outputs_action_indices --batch-size 8 --num-gpus 4 --lora-rank 32
 ```
 
+## Inference 
+On server run:
+
+```
+python3 scripts/inference_service.py --model-path /home/josyula/projects/gr00t10k --embodiment-tag new_embodiment --data-config so100  --server 
+```
+
+
 ## Notes: 
 - Changed the so100 config to handle 8(7 joints + 1 gripper) actions. 
 
