@@ -19,6 +19,19 @@
 [![GitHub star chart](https://img.shields.io/github/stars/NVIDIA/Isaac-GR00T?style=flat-square)](https://star-history.com/#NVIDIA/Isaac-GR00T)
 [![Open Issues](https://img.shields.io/github/issues-raw/NVIDIA/Isaac-GR00T?style=flat-square)](https://github.com/NVIDIA/Isaac-GR00T/issues)
 
+## Convert your existing dataset to LeRobot format using 
+`python3 Isaac-GR00T/getting_started/LeRobotFormat/convert_to_lerobot.py` 
+
+
+## Training with LoRA 
+
+```
+python scripts/gr00t_finetune.py --dataset-path /mnt/data/franka_lerobot_dataset/ --embodiment-tag new_embodiment --data-config so100 --output-dir /mnt/data/outputs_action_indices --batch-size 8 --num-gpus 4 --lora-rank 32
+```
+
+## Notes: 
+- Changed the so100 config to handle 8(7 joints + 1 gripper) actions. 
+
 ## NVIDIA Isaac GR00T
 
 <div align="center">
