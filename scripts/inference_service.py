@@ -102,7 +102,6 @@ def _example_zmq_client_call(obs: dict, host: str, port: int, api_token: str):
     print("Available modality config available:")
     modality_configs = policy_client.get_modality_config()
     print(modality_configs.keys())
-
     time_start = time.time()
     action = policy_client.get_action(obs)
     print(f"Total time taken to get action from server: {time.time() - time_start} seconds")
@@ -156,6 +155,7 @@ def main(args: ArgsConfig):
             modality_transform=modality_transform,
             embodiment_tag=args.embodiment_tag,
             denoising_steps=args.denoising_steps,
+            device="cuda"
         )
 
         # Start the server

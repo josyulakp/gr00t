@@ -239,7 +239,7 @@ class Gr00tPolicy(BasePolicy):
     def _load_model(self, model_path):
         model = GR00T_N1_5.from_pretrained(model_path, torch_dtype=COMPUTE_DTYPE)
         model.eval()  # Set model to eval mode
-        model.to(device=self.device)  # type: ignore
+        model.to(device="cuda")  # type: ignore
 
         # Update action_horizon to match modality config
         # Get the expected action horizon from the modality config
@@ -261,6 +261,7 @@ class Gr00tPolicy(BasePolicy):
 
             # Create new action head with updated config
             new_action_head = FlowmatchingActionHead(new_action_head_config)
+            
 
             # Copy the weights from the old action head to the new one
             new_action_head.load_state_dict(model.action_head.state_dict(), strict=False)
@@ -272,6 +273,8 @@ class Gr00tPolicy(BasePolicy):
             model.config.action_horizon = expected_action_horizon
             model.action_horizon = expected_action_horizon
             model.config.action_head_cfg["action_horizon"] = expected_action_horizon
+            model.to(device="cuda")  # type: ignore
+
 
         self.model = model
 
