@@ -120,7 +120,7 @@ CAMERA_MAPPING = {
     'right': 'right',
     'wrist': 'wrist'
 }
-
+DEFAULT_CHUNK_SIZE = 1000
 @dataclass
 class EpisodeMetadata:
     """Metadata for a single episode."""
@@ -233,7 +233,7 @@ class LeRobotConverter:
             obs = data['joint_states'][i].tolist() + data['gripper_states'][i].tolist()
             
             # Create action dictionary (in a real implementation, you might compute this)
-            action = data['gello_joint_states'][i].tolist() + data['gripper_states'][i].tolist()              
+            action = data['gello_joint_states'][i].tolist() + [data['gello_gripper_percent'][i]]              
             observations.append(obs)
             actions.append(action)
             # Store relative timestamp (seconds since start of episode)
@@ -269,6 +269,10 @@ class LeRobotConverter:
         """Generate the info.json file with dataset metadata."""
         total_frames = sum(ep['num_frames'] for ep in self.metadata)
         total_duration = sum(ep['duration'] for ep in self.metadata)
+        total_chunks = 0
+        for numf in ep["num_frames"]:
+            if numf % DEFAULT_CHUNK_SIZE != 0:
+                total_chunks += 1
         
         info = {
             "codebase_version": "v2.1",
@@ -277,8 +281,8 @@ class LeRobotConverter:
             "total_episodes": len(self.metadata),
             "total_frames": total_frames,
             "total_tasks": 1,  # Assuming single task for now
-            "total_chunks": 1,
-            "chunks_size": 1000,
+            "total_chunks": total_chunks,
+            "chunks_size": DEFAULT_CHUNK_SIZE,
             "total_videos": len(self.metadata) * len(CAMERA_MAPPING),
             "splits": {
                 "train": f"0:{len(self.metadata)}"  # All episodes for training

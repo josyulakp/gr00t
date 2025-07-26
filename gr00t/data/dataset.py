@@ -551,6 +551,7 @@ class LeRobotSingleDataset(Dataset):
             parquet_path = self.dataset_path / self.data_path_pattern.format(
                 episode_chunk=chunk_index, episode_index=trajectory_id
             )
+            # print(f"parquet path: {parquet_path}")
             assert parquet_path.exists(), f"Parquet file not found at {parquet_path}"
             return pd.read_parquet(parquet_path)
 
@@ -573,6 +574,7 @@ class LeRobotSingleDataset(Dataset):
 
     def get_episode_chunk(self, ep_index: int) -> int:
         """Get the chunk index for an episode index."""
+        # print(f"Episode index: {ep_index}, chunk size: {self.chunk_size}, chunk index: {ep_index // self.chunk_size}")
         return ep_index // self.chunk_size
 
     def retrieve_data_and_pad(
