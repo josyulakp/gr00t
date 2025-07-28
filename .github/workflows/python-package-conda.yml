@@ -20,7 +20,9 @@ jobs:
         echo $CONDA/bin >> $GITHUB_PATH
     - name: Install dependencies
       run: |
-        conda env update --file environment.yml --name base
+        pip install --upgrade setuptools
+        pip install -e .[base]
+        pip install --no-build-isolation flash-attn==2.7.1.post4 
     - name: Lint with flake8
       run: |
         conda install flake8
