@@ -54,6 +54,10 @@ dependencies = [
     "tyro",
     "pytest",
     "peft",
+    "jax==0.6.2",
+    "jaxlib==0.6.2",
+    "flax==0.10.7",
+    "einops==0.8.1",
 ]
 
 [project.optional-dependencies]

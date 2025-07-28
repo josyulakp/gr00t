@@ -64,7 +64,7 @@ from franky import Affine, CartesianMotion, ReferenceType
 from scipy.spatial.transform import Rotation as R
 
 from action_lipo import ActionLiPo
-
+from real_time_chunking import realtime_action
 
 chunk = 50
 blend = 10
@@ -302,6 +302,9 @@ def main(args: ArgsConfig):
             else:
                 action = _example_zmq_client_call(obs, args.host, args.port, args.api_token)
 
+            ## realtime action chunking 
+           
+            
             for key, value in action.items():
                 print(f"Action: {key}: {value}")
             # import ipdb; ipdb.set_trace()

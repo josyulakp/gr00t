@@ -405,7 +405,7 @@ class FlowmatchingActionHead(nn.Module):
 
             # Update actions using euler integration.
             actions = actions + dt * pred_velocity
-        return BatchFeature(data={"action_pred": actions})
+        return BatchFeature(data={"action_pred": actions, "action_velocity": pred_velocity})
 
     @property
     def device(self):
