@@ -41,13 +41,13 @@ from dataclasses import asdict
 from pprint import pformat
 from queue import Queue
 from typing import Any
+import cv2
 
 import draccus
 import grpc
 import torch
 
-from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig  # noqa: F401
-from lerobot.cameras.realsense.configuration_realsense import RealSenseCameraConfig  # noqa: F401
+from opencv import OpenCVCameraConfig, OpenCVCamera
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.robots import (  # noqa: F401
     Robot,
@@ -78,6 +78,35 @@ from lerobot.transport import (
 )
 from lerobot.transport.utils import grpc_channel_options, send_bytes_in_chunks
 import numpy as np 
+import franky 
+
+
+
+robot = franky.Robot("172.16.0.2")
+robot.relative_dynamics_factor = 0.05
+gripper = franky.Gripper("172.16.0.2")
+max_gripper_width = 0.08  # ~80 mm
+FPS = 30
+
+
+
+# Cameras setup
+camera_configs = {
+    "left": OpenCVCameraConfig(camera_index=16, fps=FPS, width=640, height=480),
+    "right": OpenCVCameraConfig(camera_index=10, fps=FPS, width=640, height=480),
+    "wrist": OpenCVCameraConfig(camera_index=4, fps=FPS, width=640, height=480),
+}
+
+cameras = {}
+for name, cfg in camera_configs.items():
+    cameras[name] = OpenCVCamera(cfg)
+    try:
+        cameras[name].connect()
+        cameras[name].async_read()
+        print(f"Connected to camera {name} (index {cfg.camera_index})")
+    except Exception as e:
+        print(f"Failed to connect camera {name}: {e}")
+
 
 class RobotClient:
     prefix = "robot_client"
@@ -374,10 +403,17 @@ class RobotClient:
             # Get action from queue
             timed_action = self.action_queue.get_nowait()
         get_end = time.perf_counter() - get_start
+        # print("timed action ", timed_action)
+        action = timed_action.get_action()
+        # print(action)
 
-        _performed_action = self.robot.send_action(
-            self._action_tensor_to_action_dict(timed_action.get_action())
-        )
+        joint_action = action[:7]
+        gripper_action = action[-1]
+        try:
+            success = robot.move(franky.JointMotion(joint_action))
+        except Exception as e:
+            print(f"Exception in moving robot {e}")
+
         with self.latest_action_lock:
             self.latest_action = timed_action.get_timestep()
 
@@ -394,7 +430,10 @@ class RobotClient:
             self.logger.debug(
                 f"Popping action from queue to perform took {get_end:.6f}s | Queue size: {current_queue_size}"
             )
-
+        if success: 
+            _performed_action = joint_action 
+        else:
+           _performed_action = None
         return _performed_action
 
     def _ready_to_send_observation(self):
@@ -406,14 +445,24 @@ class RobotClient:
         try:
             # Get serialized observation bytes from the function
             start_time = time.perf_counter()
+            top_img = cameras["right"].async_read()
+            wrist_img = cameras["wrist"].async_read()
+            left_img = cameras["left"].async_read()
+            print(f"images shape {top_img.shape}{wrist_img.shape}{left_img.shape}")
+            robot_state = robot.current_joint_state.position.reshape(1,7)
+            gripper_state = np.array(gripper.width/2.0).reshape(1,1)
+            cv2.imwrite("/home/prnuc/Documents/josyulak/gr00t/scripts/top_image.png", top_img[:, :, ::-1])
+            cv2.imwrite("/home/prnuc/Documents/josyulak/gr00t/scripts/wrist_image.png", wrist_img[:, :, ::-1])
+            cv2.imwrite("/home/prnuc/Documents/josyulak/gr00t/scripts/left_image.png", left_img[:, :, ::-1])
+
 
             raw_observation: RawObservation = {
-                "video.left":  np.random.randint(0, 256, (1, 480, 640, 3), dtype=np.uint8), #np.random.randint(0, 256, (1, 480, 640, 3), dtype=np.uint8),
-                "video.right": np.random.randint(0, 256, (1, 480, 640, 3), dtype=np.uint8), #np.random.randint(0, 256, (1, 480, 640, 3), dtype=np.uint8),
-                "video.wrist": np.random.randint(0, 256, (1, 480, 640, 3), dtype=np.uint8), #np.random.randint(0, 256, (1, 480, 640, 3), dtype=np.uint8),
-                "state.single_arm": np.random.rand(1,7), #np.random.rand(1,7) 
-                "state.gripper": np.random.rand(1,1), #np.random.rand(1,1)
-                "annotation.human.action.task_description": [task]
+                "video.left":  left_img[:, :, ::-1].reshape(1,480,640,3), #np.random.randint(0, 256, (1, 480, 640, 3), dtype=np.uint8),
+                "video.right": top_img[:, :, ::-1].reshape(1,480,640,3), #np.random.randint(0, 256, (1, 480, 640, 3), dtype=np.uint8),
+                "video.wrist": wrist_img[:, :, ::-1].reshape(1,480,640,3), #np.random.randint(0, 256, (1, 480, 640, 3), dtype=np.uint8),
+                "state.single_arm": robot_state, #np.random.rand(1,7) 
+                "state.gripper": gripper_state, #np.random.rand(1,1)
+                "annotation.human.action.task_description": ["Pick the bowl and place it in the green square"],
             }
 
             with self.latest_action_lock:
