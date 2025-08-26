@@ -25,6 +25,8 @@ from dataclasses import dataclass
 from typing import Literal
 
 import numpy as np
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
 import tyro
 import cv2
 import franky
@@ -36,6 +38,7 @@ from gr00t.experiment.data_config import DATA_CONFIG_MAP
 from gr00t.model.policy import Gr00tPolicy
 
 from action_lipo import ActionLiPo
+from collections import deque
 
 
 
@@ -70,6 +73,7 @@ for name, cfg in camera_configs.items():
         print(f"Connected to camera {name} (index {cfg.camera_index})")
     except Exception as e:
         print(f"Failed to connect camera {name}: {e}")
+
 
 
 #####################################################################
@@ -113,6 +117,50 @@ def _example_http_client_call(obs: dict, host: str, port: int, api_token: str):
         print(f"Error: {response.status_code} - {response.text}")
         return {}
 
+def decision_tree_loader(path = "/home/prnuc/Documents/josyulak/gr00t/obs_to_last_action.csv"): 
+    from sklearn.model_selection import train_test_split
+    from sklearn.tree import DecisionTreeClassifier
+    import pandas as pd
+    from sklearn.svm import SVC
+
+
+
+    # Path to your data
+    
+
+    # Load CSV
+    df = pd.read_csv(path)
+
+    # Features (first 7 columns)
+    X = df.iloc[:, :7]
+
+    # Target (last column = gripper state)
+    y_raw = df.iloc[:, -1]
+
+    # Convert continuous values -> categorical labels
+    y = (y_raw >= 0.039).astype(int)   # 1=open, 0=closed
+
+    # Train-test split
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42
+    )
+
+    # Initialize Decision Tree Classifier
+    clf = DecisionTreeClassifier(
+        criterion="gini",
+        max_depth=50,
+        random_state=42
+    )
+    # clf = LogisticRegression()
+    # clf = SVC(kernel='sigmoid', probability=True) 
+    # clf = RandomForestClassifier(n_estimators=100)
+
+    clf.fit(X_train, y_train)
+
+    return clf
+print("fitting gripper dt")
+decision_tree = decision_tree_loader()
+print("done fit")
 
 #####################################################################
 # Producer–Consumer with Blending
@@ -223,95 +271,97 @@ def moving_average_chunk(chunk, window_size=3, axis=0, mode='valid'):
     kernel = np.ones(window_size) / window_size
     return np.apply_along_axis(lambda m: np.convolve(m, kernel, mode=mode), axis, chunk)
 
-def execute_actions_loop(fps=30):
-    """Execute actions and allow interleaving using LiPo blending."""
+def execute_actions_loop(fps=30, stability_horizon=5):
+    """Execute actions with LiPo blending and smarter gripper logic."""
     dt = 1.0 / fps
     current_chunk = None
     current_gripper = None
-    # prev_chunk = None
     playhead = 0
     last_closed = 0
-    
-    if gripper.width/2<=0.03: 
-        gripper.open(1.0)
 
+    # Decision tree buffer
+    gripper_buffer = deque(maxlen=stability_horizon)
+
+    if gripper.width / 2 <= 0.03: 
+        gripper.open(1.0)
 
     while True:
         try:
-            # Check if new chunk arrives
+            # === Fetch new action chunk ===
             try:
                 new_chunk = action_queue.get_nowait()
                 new_actions = np.array(new_chunk["action.single_arm"])
                 new_gripper = np.array(new_chunk["action.gripper"])
 
-                # downsample + smooth
+                # Predict gripper with decision tree
+                # dt_pred = decision_tree.predict(robot.current_joint_state.position.reshape(1, 7))[0]
+                # gripper_buffer.append(dt_pred)
+                # === Predict gripper state from action chunk ===
+                # Take the middle half of the chunk (more stable than start/end)
+                mid_vals = new_gripper[new_gripper.shape[0] // 4 : 3 * new_gripper.shape[0] // 4]
+                print("mid vals", mid_vals)
+                # Compute binary prediction: 1=open, 0=close
+                # e.g., threshold at 0.02
+                pred = int(mid_vals.mean() > 0.02)   # open if avg > 0.02, else close
+                print("pred ", pred)
+                print(f"[Gripper Pred] mean={mid_vals.mean():.4f} -> pred={pred}")
+
+                # Push into buffer for stability filtering
+                gripper_buffer.append(pred)
+
+                # Downsample + smooth joints
                 new_actions = new_actions[::2]
                 new_gripper = new_gripper[::2]
                 new_actions = moving_average_chunk(new_actions, window_size=2)
 
-                # If we were already executing, interleave with LiPo
                 if current_chunk is not None:
-                    # keep last executed pose
                     tail = current_chunk[max(playhead-1, 0):playhead+1]
                     lipo_blended = get_lipo_actions(new_actions, tail)
                     current_chunk = lipo_blended
                     current_gripper = new_gripper
                     playhead = 0
                     print("[Executor] Interleaved new chunk with LiPo blending")
-                    
                 else:
                     current_chunk = new_actions
                     current_gripper = new_gripper
                     playhead = 0
                     print("[Executor] Starting first chunk")
-                # prev_chunk = current_chunk.copy()
 
             except queue.Empty:
                 pass
 
-            # Nothing to execute yet
             if current_chunk is None or current_gripper is None:
                 time.sleep(dt)
                 continue
 
-            # End of current chunk
             if playhead >= len(current_chunk):
                 time.sleep(dt)
                 continue
 
-            # Execute one step
+            # === Execute one joint action ===
             action = current_chunk[playhead]
-            grip = current_gripper[playhead]
-            print("action ", action)
-            print("gripper", current_gripper)
-            print("gripper ", current_gripper[int(current_gripper.shape[0]/2):].mean())
             robot.move(franky.JointMotion(action.tolist()), asynchronous=True)
-            print("LAST CLOSED", last_closed)
-            print("Playahead", playhead)
-            # Trigger closing once if actions[5] > 2.4
-            # if playhead == 5 and action[5] > 2.5:
-            #     gripper.grasp_async(0.0, 1.0, 20.0, epsilon_outer=1.0)
-            #     print("Triggered closing at action[5] > 2.4")
 
-            if current_gripper[int(current_gripper.shape[0]/2):].mean() <= 0.02:
-                gripper.grasp_async(0.0, 1.0, 20.0, epsilon_outer=1.0)
-                last_closed += 1
-                print("CLOSING 1")
+            # === Gripper logic ===
+            # Only trigger if predictions are stable
+            if len(gripper_buffer) == stability_horizon:
+                # print("gB", gripper_buffer)
+                # print("gB mean", np.mean(gripper_buffer) )
 
-            # if last_closed > 0:
-            #     last_closed += 1
-            
-            if last_closed >= 10: 
-                if current_gripper[int(current_gripper.shape[0]/2):].mean() > 0.02:
-                    gripper.open_async(1.0)
-                    last_closed = 0
-                else:
+                stable_pred = int(np.mean(gripper_buffer) >= 0.9)  # 1=open, 0=close
+
+                # Example gating heuristic:
+                ee_vel = np.linalg.norm(current_chunk[playhead] - current_chunk[playhead-1])
+                near_object = ee_vel < 0.01   # low velocity = likely at target
+
+                if stable_pred == 0 and near_object:   # CLOSE
                     gripper.grasp_async(0.0, 1.0, 20.0, epsilon_outer=1.0)
                     last_closed += 1
-                    print("CLOSING 2")
-            
-
-            
+                    print("[Gripper] CLOSE triggered (stable + near object)")
+                elif stable_pred == 1 and last_closed > 5:   # OPEN after holding a bit
+                    gripper.open_async(1.0)
+                    last_closed = 0
+                    print("[Gripper] OPEN triggered (stable release)")
 
             playhead += 1
             time.sleep(dt)
