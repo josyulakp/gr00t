@@ -47,11 +47,12 @@ class BaseInferenceServer:
     Can add custom endpoints by calling `register_endpoint`.
     """
 
-    def __init__(self, host: str = "*", port: int = 5555, api_token: str = None):
+    def __init__(self, host: str = "*", port: int = 5555, api_token: str = None, recv_timeout_ms: int = 10000):
         self.running = True
         self.context = zmq.Context()
         self.socket = self.context.socket(zmq.REP)
         self.socket.bind(f"tcp://{host}:{port}")
+        self.socket.setsockopt(zmq.RCVTIMEO, recv_timeout_ms)  # Set receive timeout
         self._endpoints: dict[str, EndpointHandler] = {}
         self.api_token = api_token
 
@@ -95,7 +96,11 @@ class BaseInferenceServer:
         print(f"Server is ready and listening on {addr}")
         while self.running:
             try:
-                message = self.socket.recv()
+                try:
+                    message = self.socket.recv()
+                except zmq.error.Again:
+                    # Timeout occurred, continue loop
+                    continue
                 request = TorchSerializer.from_bytes(message)
 
                 # Validate token before processing request
@@ -122,7 +127,10 @@ class BaseInferenceServer:
                 import traceback
 
                 print(traceback.format_exc())
-                self.socket.send(TorchSerializer.to_bytes({"error": str(e)}))
+                try:
+                    self.socket.send(TorchSerializer.to_bytes({"error": str(e)}))
+                except Exception as e:
+                    print(e)
 
 
 class BaseInferenceClient:

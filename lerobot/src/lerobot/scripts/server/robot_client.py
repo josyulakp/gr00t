@@ -448,6 +448,8 @@ class RobotClient:
             top_img = cameras["right"].async_read()
             wrist_img = cameras["wrist"].async_read()
             left_img = cameras["left"].async_read()
+            if((np.mean(wrist_img, axis=(0,1))==0.0).any() or (np.mean(left_img, axis=(0,1))==0.0).any() or (np.mean(top_img, axis=(0,1))==0.0).any()     ):
+                return None
             print(f"images shape {top_img.shape}{wrist_img.shape}{left_img.shape}")
             robot_state = robot.current_joint_state.position.reshape(1,7)
             gripper_state = np.array(gripper.width/2.0).reshape(1,1)

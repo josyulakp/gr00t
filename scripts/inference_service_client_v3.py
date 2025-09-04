@@ -24,6 +24,10 @@ import queue
 from dataclasses import dataclass
 from typing import Literal
 
+import os
+import glob
+
+
 import numpy as np
 import tyro
 import cv2
@@ -43,7 +47,7 @@ import pyrealsense2 as rs
 # Robot and Camera Setup
 #####################################################################
 robot = franky.Robot("172.16.0.2")
-robot.relative_dynamics_factor = 0.02
+robot.relative_dynamics_factor = 0.03
 robot.set_collision_behavior([15.0]*7, [30.0]*6)
 
 gripper = franky.Gripper("172.16.0.2")
@@ -275,8 +279,16 @@ def fetch_actions_loop(args):
     rs_top, align_top = create_rs_camera(serial_top)
     rs_wrist, align_wrist = create_rs_camera(serial_wrist)
 
+    video_path = get_next_video_filename(ext="avi")
+    fourcc = cv2.VideoWriter_fourcc(*'XVID')
+    video_writer = cv2.VideoWriter(video_path, fourcc, FPS, (640, 480))
+    print(f"[Video] Recording top camera to {video_path}")
+
+
     while True:
         try:
+            
+
             # Wait + align frames
             left_frames = align_left.process(rs_left.wait_for_frames())
             top_frames = align_top.process(rs_top.wait_for_frames())
@@ -308,7 +320,9 @@ def fetch_actions_loop(args):
             cv2.imwrite("/home/prnuc/Documents/josyulak/gr00t/scripts/top_image.png", top_img)
             cv2.imwrite("/home/prnuc/Documents/josyulak/gr00t/scripts/wrist_image.png", wrist_img)
             cv2.imwrite("/home/prnuc/Documents/josyulak/gr00t/scripts/wrist_depth.png", (wrist_depth * 0.05).astype(np.uint8))  # scaled for visibility
-            
+
+            video_writer.write(top_img) 
+
             # Robot state
             robot_state = robot.current_joint_state.position.reshape(1, 7)
             gripper_state = np.array(gripper.width / 2.0).reshape(1, 1)
@@ -324,15 +338,30 @@ def fetch_actions_loop(args):
                     "Pick the bowl and place it in the green square"
                 ],
             }
+
+
             depth_scale = get_depth_scale(rs_wrist)
-            depth_mean = depth_scale*wrist_depth.mean()
+            h, w = wrist_depth.shape[:2]
+            half_h, half_w = h // 2, w // 2
+            # Bottom-right quadrant
+            # wrist_depth = wrist_depth[h//2:, w//2:]
+            wrist_depth_bottom_left = wrist_depth[half_h:h, 0:half_w]
+
+            # Bottom-right: rows 240:480, columns 320:640
+            wrist_depth_bottom_right = wrist_depth[half_h:h, half_w:w]
+
+            # depth_mean = depth_scale*wrist_depth.mean()
+
+            depth_mean = (wrist_depth_bottom_left.mean() + wrist_depth_bottom_right.mean())*0.5*depth_scale
             # inside = inside_bowl(wrist_depth, depth_scale, debug=True)
 
             # inside = detect_bowl_and_check_wrist(wrist_depth, wrist_px=wrist_points[0], debug=True)
             # print("Inside ", inside)
             # Send obs to server
             if args.http_server:
+                print("2")
                 actions = _example_http_client_call(obs, args.host, args.port, args.api_token)
+                print("3")
             else:
                 actions = _example_zmq_client_call(obs, args.host, args.port, args.api_token)
             
@@ -410,6 +439,14 @@ def moving_average_chunk(chunk, window_size=3, axis=0, mode='valid'):
     kernel = np.ones(window_size) / window_size
     return np.apply_along_axis(lambda m: np.convolve(m, kernel, mode=mode), axis, chunk)
 
+def get_next_video_filename(base_dir="videos", prefix="experiment", ext="mp4"):
+    os.makedirs(base_dir, exist_ok=True)
+    existing = glob.glob(os.path.join(base_dir, f"{prefix}[0-9][0-9][0-9].{ext}"))
+    numbers = [int(os.path.basename(f).replace(prefix, "").replace(f".{ext}", "")) for f in existing]
+    next_number = max(numbers) + 1 if numbers else 1
+    return os.path.join(base_dir, f"{prefix}{next_number:03d}.{ext}")
+
+
 def execute_actions_loop(fps=30):
     """Execute actions and allow interleaving using LiPo blending."""
     dt = 1.0 / fps
@@ -419,7 +456,7 @@ def execute_actions_loop(fps=30):
 
     # Track when we last closed the gripper
     last_closed_time = None
-    hold_duration = 4.0  # seconds
+    hold_duration = 10.0  # seconds
 
     if gripper.width / 2 <= 0.03: 
         gripper.open(1.0)
@@ -433,6 +470,7 @@ def execute_actions_loop(fps=30):
                 new_chunk = action_queue.get_nowait()
                 new_actions = np.array(new_chunk["action.single_arm"])
                 new_gripper = np.array(new_chunk["action.gripper"])
+                print("gripper actions", new_gripper)
                 depth_mean = new_chunk.get("depth_mean", depth_mean)
                 print("execute depth mean ", depth_mean)
 
@@ -468,13 +506,14 @@ def execute_actions_loop(fps=30):
 
             # === Execute one step ===
             action = current_chunk[playhead]
+            print("0")
             robot.move(franky.JointMotion(action.tolist()), asynchronous=True)
-
+            print("1")
             # === Gripper logic ===
             now = time.time()
 
             # Trigger closing (if action suggests or depth threshold hit)
-            if ((depth_mean <= 0.095) or current_gripper[int(current_gripper.shape[0]/2):].mean() <= 0.02) and last_closed_time is None:
+            if ((depth_mean <= 0.11) or current_gripper[int(current_gripper.shape[0]/2):].mean() <= 0.03) and last_closed_time is None:
                 gripper.grasp_async(0.0, 1.0, 20.0, epsilon_outer=1.0)
                 last_closed_time = now
                 print("[Gripper] CLOSE triggered")
@@ -491,6 +530,8 @@ def execute_actions_loop(fps=30):
 
         except Exception as e:
             print(f"[Executor] Error executing action: {e}")
+            if robot.has_errors: 
+                robot.recover_from_errors()
             time.sleep(0.1)
 
 
