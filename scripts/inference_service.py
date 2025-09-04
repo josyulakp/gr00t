@@ -69,7 +69,7 @@ class ArgsConfig:
     port: int = 5555
     """The port number for the server."""
 
-    host: str = "localhost"
+    host: str = "0.0.0.0"
     """The host address for the server."""
 
     server: bool = False

@@ -60,7 +60,7 @@ class HTTPInferenceServer:
                 )
 
             obs = payload["observation"]
-
+            # print(obs.keys())
             # Run inference
             action = self.policy.get_action(obs)
 
