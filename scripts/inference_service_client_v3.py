@@ -42,6 +42,10 @@ from gr00t.model.policy import Gr00tPolicy
 from action_lipo import ActionLiPo
 import pyrealsense2 as rs
 
+from concurrent.futures import ThreadPoolExecutor
+
+# Thread pool for async network calls
+net_pool = ThreadPoolExecutor(max_workers=2)
 
 #####################################################################
 # Robot and Camera Setup
@@ -175,19 +179,21 @@ def detect_wrist_pixels(image, debug=False):
     
     return wrist_points
 
-def detect_bowl_and_check_wrist(depth_image, wrist_px=None, debug=False):
+def detect_bowl_and_check_wrist(depth_image, wrist_px_list, depth_scale=0.001, debug=True):
     """
-    Fit circle to bowl rim in depth image and check if wrist is inside.
-    wrist_px: (x,y) pixel of wrist in depth map. If None, use image center.
+    Detect bowl rim via circle fitting on depth image and check if wrist is inside.
+    inside = True if any wrist pixel depth < rim mean depth.
+
+    Args:
+        depth_image: np.ndarray (H,W), raw depth values.
+        wrist_px_list: list of (x,y) wrist pixel coordinates in image space.
+        depth_scale: depth unit scaling (to meters).
+        debug: if True, saves visualization.
     """
     h, w = depth_image.shape
-    gray = cv2.convertScaleAbs(depth_image, alpha=0.03)  # normalize
-    # blur = cv2.GaussianBlur(gray, (9,9), 2)
+    gray = cv2.convertScaleAbs(depth_image, alpha=0.03)
 
-    # Edge detection
-    # edges = cv2.Canny(blur, 50, 150)
-
-    # Detect circles
+    # Detect circles (bowl rim)
     circles = cv2.HoughCircles(
         gray,
         cv2.HOUGH_GRADIENT,
@@ -195,82 +201,50 @@ def detect_bowl_and_check_wrist(depth_image, wrist_px=None, debug=False):
         minDist=100,
         param1=100,
         param2=30,
-        minRadius=50,
+        minRadius=75,
         maxRadius=200
     )
-    print("Circles: ", circles)
+
     inside = False
     circle_params = None
 
     if circles is not None:
         circles = np.round(circles[0, :]).astype("int")
-        # Take the largest circle as bowl
-        circle_params = max(circles, key=lambda c: c[2])  # (x,y,r)
+        circle_params = max(circles, key=lambda c: c[2])  # largest circle
         cx, cy, r = circle_params
 
-        # Wrist point
-        if wrist_px is None:
-            wrist_px = (w//2, h//2)
-        wx, wy = wrist_px
+        # Extract rim band (pixels near circle edge)
+        yy, xx = np.ogrid[:h, :w]
+        dist_from_center = np.sqrt((xx - cx)**2 + (yy - cy)**2)
+        rim_mask = np.logical_and(dist_from_center > r-5, dist_from_center < r+5)
 
-        dist = np.sqrt((wx - cx)**2 + (wy - cy)**2)
-        inside = dist < r
+        rim_depths = depth_image[rim_mask].astype(np.float32) * depth_scale
+        rim_depth = np.nanmean(rim_depths) if rim_depths.size > 0 else np.inf
+
+
+        # Wrist depth(s)
+        for (wx, wy) in wrist_px_list:
+            if 0 <= wx < w and 0 <= wy < h:
+                wrist_depth = depth_image[wy, wx] * depth_scale
+                if wrist_depth > rim_depth - 0.01:  # margin = 1cm
+                    inside = True
+                    break
 
         if debug:
             disp = cv2.applyColorMap(gray, cv2.COLORMAP_JET)
             cv2.circle(disp, (cx, cy), r, (0,255,0), 2)
-            cv2.circle(disp, wrist_px, 5, (0,0,255), -1)
+            for (wx, wy) in wrist_px_list:
+                cv2.circle(disp, (wx, wy), 5, (0,0,255), -1)
             cv2.imwrite("/home/prnuc/Documents/josyulak/gr00t/scripts/depth_wrist.png", disp)
-            # print(f"Circle center=({cx},{cy}), radius={r}, wrist={wrist_px}, inside={inside}")
+            print(f"Rim depth={rim_depth:.3f}m, Inside={inside}")
 
-    return inside
-
-def inside_bowl(depth_image, depth_scale, roi=None, debug=False, crop_ratio=0.9):
-    """
-    Heuristic: compare mean depth in the center region to the rim region.
-    If the center is closer to camera than rim, assume wrist is inside bowl.
-
-    Args:
-        depth_image: np.ndarray, depth map (H, W).
-        depth_scale: scale to convert depth to meters.
-        roi: unused (kept for compatibility).
-        debug: if True, saves visualization.
-        crop_ratio: fraction of image size to use as center crop.
-    """
-    h, w = depth_image.shape
-    
-    print("mean depth ", depth_scale*depth_image.mean())
-    # Define a central crop
-    cw, ch = int(w * crop_ratio), int(h * crop_ratio)
-    x0, y0 = w // 2 - cw // 2, h // 2 - ch // 2
-    center_region = depth_image[y0:y0+ch, x0:x0+cw].astype(np.float32) * depth_scale
-
-    # Rim = full image minus center
-    mask = np.ones_like(depth_image, dtype=np.uint8)
-    mask[y0:y0+ch, x0:x0+cw] = 0
-    rim_region = depth_image[mask.astype(bool)].astype(np.float32) * depth_scale
-
-    center_mean = np.nanmean(center_region)
-    rim_mean = np.nanmean(rim_region)
-
-    inside = center_mean < rim_mean - 0.02  # margin (2cm)
-
-    if debug:
-        disp = cv2.applyColorMap(
-            cv2.convertScaleAbs(depth_image, alpha=0.03),
-            cv2.COLORMAP_JET
-        )
-        cv2.rectangle(disp, (x0, y0), (x0+cw, y0+ch), (0,255,0), 2)
-        # out_path = "depth_debug.png"
-        out_path = "/home/prnuc/Documents/josyulak/gr00t/scripts/depth_wrist.png"
-        cv2.imwrite(out_path, disp)
-        # print(f"[Debug] Saved visualization to {out_path}")
-        print(f"Center mean depth: {center_mean:.3f} m, Rim mean: {rim_mean:.3f} m, Inside: {inside}")
+    else:
+        print("No bowl rim detected")
 
     return inside
 
 def fetch_actions_loop(args):
-    """ Continuously fetch actions from server with depth capture """
+    """ Continuously fetch actions from server with depth capture (non-blocking). """
     serial_left = "142422250807" 
     serial_top = "025522060843"
     serial_wrist = "218622278163"
@@ -284,52 +258,57 @@ def fetch_actions_loop(args):
     video_writer = cv2.VideoWriter(video_path, fourcc, FPS, (640, 480))
     print(f"[Video] Recording top camera to {video_path}")
 
+    depth_scale = get_depth_scale(rs_wrist)
 
     while True:
         try:
-            
+            # --- Non-blocking frame grab ---
+            left_frames = rs_left.poll_for_frames()
+            top_frames  = rs_top.poll_for_frames()
+            wrist_frames = rs_wrist.poll_for_frames()
 
-            # Wait + align frames
-            left_frames = align_left.process(rs_left.wait_for_frames())
-            top_frames = align_top.process(rs_top.wait_for_frames())
-            wrist_frames = align_wrist.process(rs_wrist.wait_for_frames())
+            if not (left_frames and top_frames and wrist_frames):
+                time.sleep(0.01)
+                continue  # skip if any camera has no new frames
+
+            # Align to color stream
+            left_frames = align_left.process(left_frames)
+            top_frames  = align_top.process(top_frames)
+            wrist_frames = align_wrist.process(wrist_frames)
 
             # Extract color
-            left_img = np.asanyarray(left_frames.get_color_frame().get_data())
-            top_img = np.asanyarray(top_frames.get_color_frame().get_data())
+            left_img  = np.asanyarray(left_frames.get_color_frame().get_data())
+            top_img   = np.asanyarray(top_frames.get_color_frame().get_data())
             wrist_img = np.asanyarray(wrist_frames.get_color_frame().get_data())
-            # wrist_points = detect_wrist_pixels(wrist_img)
-            # wrist_points = [(494, 354), (532, 346), (423, 218), (560, 195)]
-            # print(wrist_points)
 
-            # Extract depth (aligned to color)
-            # left_depth = np.asanyarray(left_frames.get_depth_frame().get_data())
-            # top_depth = np.asanyarray(top_frames.get_depth_frame().get_data())
+            # Extract depth (aligned)
             wrist_depth = np.asanyarray(wrist_frames.get_depth_frame().get_data())
 
-            if((np.mean(wrist_img, axis=(0,1))==0.0).any() or (np.mean(left_img, axis=(0,1))==0.0).any() or (np.mean(top_img, axis=(0,1))==0.0).any() or (np.mean(top_img, axis=(0,1))<=50.0).any()  ):
-                #no action
-                raise Exception("invalid image data")
+            # Quick sanity checks
+            if wrist_depth is None or left_img is None or top_img is None or wrist_img is None:
+                continue
+            if ((np.mean(wrist_img) <= 50.0) or (np.mean(top_img) <= 50.0)):
+                continue
+            ##
+            # Save debug images
+            cv2.imwrite("left_image.png", left_img)
+            cv2.imwrite("top_image.png", top_img)
+            cv2.imwrite("wrist_image.png", wrist_img)
+            cv2.imwrite("wrist_depth.png", (wrist_depth * 0.05).astype(np.uint8))
 
-            # Quick depth sanity check
-            if wrist_depth is None:
-                raise Exception("invalid depth data")
 
-            # Save debug frames
-            cv2.imwrite("/home/prnuc/Documents/josyulak/gr00t/scripts/left_image.png", left_img)
-            cv2.imwrite("/home/prnuc/Documents/josyulak/gr00t/scripts/top_image.png", top_img)
-            cv2.imwrite("/home/prnuc/Documents/josyulak/gr00t/scripts/wrist_image.png", wrist_img)
-            cv2.imwrite("/home/prnuc/Documents/josyulak/gr00t/scripts/wrist_depth.png", (wrist_depth * 0.05).astype(np.uint8))  # scaled for visibility
+            video_writer.write(top_img)
 
-            video_writer.write(top_img) 
+            wrist_pixels  =  detect_wrist_pixels(wrist_img, debug=True)
+            inside_bowl = detect_bowl_and_check_wrist(wrist_depth, wrist_pixels, depth_scale=depth_scale, debug=True)
 
             # Robot state
-            robot_state = robot.current_joint_state.position.reshape(1, 7)
+            robot_state   = robot.current_joint_state.position.reshape(1, 7)
             gripper_state = np.array(gripper.width / 2.0).reshape(1, 1)
 
-            # Build obs (RGB + depth)
+            # Observation dict
             obs = {
-                "video.left": left_img.reshape(1, 480, 640, 3),
+                "video.left":  left_img.reshape(1, 480, 640, 3),
                 "video.right": top_img.reshape(1, 480, 640, 3),
                 "video.wrist": wrist_img.reshape(1, 480, 640, 3),
                 "state.single_arm": robot_state,
@@ -339,34 +318,25 @@ def fetch_actions_loop(args):
                 ],
             }
 
-
-            depth_scale = get_depth_scale(rs_wrist)
+            # Depth heuristic (average of bottom quadrants)
             h, w = wrist_depth.shape[:2]
             half_h, half_w = h // 2, w // 2
-            # Bottom-right quadrant
-            # wrist_depth = wrist_depth[h//2:, w//2:]
-            wrist_depth_bottom_left = wrist_depth[half_h:h, 0:half_w]
+            bottom_left  = wrist_depth[half_h:h, 0:half_w]
+            bottom_right = wrist_depth[half_h:h, half_w:w]
+            depth_mean = ((bottom_left.mean() + bottom_right.mean()) * 0.5) * depth_scale
 
-            # Bottom-right: rows 240:480, columns 320:640
-            wrist_depth_bottom_right = wrist_depth[half_h:h, half_w:w]
-
-            # depth_mean = depth_scale*wrist_depth.mean()
-
-            depth_mean = (wrist_depth_bottom_left.mean() + wrist_depth_bottom_right.mean())*0.5*depth_scale
-            # inside = inside_bowl(wrist_depth, depth_scale, debug=True)
-
-            # inside = detect_bowl_and_check_wrist(wrist_depth, wrist_px=wrist_points[0], debug=True)
-            # print("Inside ", inside)
-            # Send obs to server
+            # Query policy
             if args.http_server:
                 print("2")
                 actions = _example_http_client_call(obs, args.host, args.port, args.api_token)
                 print("3")
             else:
                 actions = _example_zmq_client_call(obs, args.host, args.port, args.api_token)
-            
-            actions['depth_mean'] = depth_mean
 
+            actions["depth_mean"] = depth_mean
+            actions["inside_bowl"] = inside_bowl
+
+            # Replace queue contents with latest actions (non-blocking put)
             if not action_queue.empty():
                 try:
                     action_queue.get_nowait()
@@ -375,8 +345,9 @@ def fetch_actions_loop(args):
             action_queue.put_nowait(actions)
 
         except Exception as e:
-            print(f"[Fetcher] Error getting actions: {e}")
-            time.sleep(0.1)
+            print(f"[Fetcher] Error: {e}")
+            time.sleep(0.01)
+
 
 def blend_chunks(old_chunk, new_chunk, blend_len=4):
     """ Linearly interpolate between the end of old_chunk and start of new_chunk """
@@ -462,6 +433,7 @@ def execute_actions_loop(fps=30):
         gripper.open(1.0)
 
     depth_mean = 10.0
+    inside_bowl = False
 
     while True:
         try:
@@ -472,6 +444,7 @@ def execute_actions_loop(fps=30):
                 new_gripper = np.array(new_chunk["action.gripper"])
                 print("gripper actions", new_gripper)
                 depth_mean = new_chunk.get("depth_mean", depth_mean)
+                inside_bowl = new_chunk.get("inside_bowl", inside_bowl)
                 print("execute depth mean ", depth_mean)
 
                 # downsample + smooth
@@ -506,14 +479,12 @@ def execute_actions_loop(fps=30):
 
             # === Execute one step ===
             action = current_chunk[playhead]
-            print("0")
             robot.move(franky.JointMotion(action.tolist()), asynchronous=True)
-            print("1")
             # === Gripper logic ===
             now = time.time()
 
-            # Trigger closing (if action suggests or depth threshold hit)
-            if ((depth_mean <= 0.11) or current_gripper[int(current_gripper.shape[0]/2):].mean() <= 0.03) and last_closed_time is None:
+            # Trigger closing (if action suggests or depth threshold hit)int(current_gripper.shape[0]/2)
+            if (depth_mean <=0.11 or current_gripper[-3:].mean() <= 0.03) and last_closed_time is None:
                 gripper.grasp_async(0.0, 1.0, 20.0, epsilon_outer=1.0)
                 last_closed_time = now
                 print("[Gripper] CLOSE triggered")
