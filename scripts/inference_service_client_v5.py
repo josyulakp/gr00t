@@ -9,7 +9,7 @@ to Polymetis using a non-blocking joint impedance controller.
 import os
 import sys
 sys.path.insert(0, "/home/prnuc/polymetis/polymetis/python")  # ensure torchcontrol & polymetis are importable early
-
+import cv2
 import time
 import threading
 import queue
@@ -27,6 +27,8 @@ from polymetis import RobotInterface
 
 # LiPo blending (unchanged)
 from action_lipo import ActionLiPo
+
+from polymetis import GripperInterface
 
 
 #####################################################################
@@ -106,7 +108,7 @@ action_queue = queue.Queue(maxsize=1)
 #####################################################################
 # Fetch Loop (video + state -> GR00T -> actions)
 #####################################################################
-def fetch_actions_loop(args: ArgsConfig, robot: RobotInterface):
+def fetch_actions_loop(args: ArgsConfig, robot: RobotInterface, gripper:GripperInterface ):
     """Continuously fetch actions from server with depth capture."""
     # Update these to your actual serials
     serial_left = "142422250807"
@@ -155,7 +157,8 @@ def fetch_actions_loop(args: ArgsConfig, robot: RobotInterface):
 
             # NOTE: Polymetis doesn't control the Franka gripper directly; keep your external
             # gripper bridge if needed. Here we pass a placeholder scalar.
-            gripper_width_half = np.array([0.04], dtype=np.float32).reshape(1, 1)
+            gripper_state = gripper.get_state()
+            gripper_width_half = np.array([gripper_state.width], dtype=np.float32).reshape(1, 1)
 
             # Observation for GR00T
             obs = {
@@ -168,6 +171,12 @@ def fetch_actions_loop(args: ArgsConfig, robot: RobotInterface):
                     "Pick the bowl and place it in the green square"
                 ],
             }
+
+            cv2.imwrite("left_image.png", left_img)
+            cv2.imwrite("top_image.png", top_img)
+            cv2.imwrite("wrist_image.png", wrist_img)
+            # cv2.imwrite("wrist_depth.png", (wrist_depth * 0.05).astype(np.uint8))
+
 
             # Get actions from server
             actions = gr00t_socket_client_call(obs, args.host, args.port)
@@ -222,7 +231,7 @@ def get_lipo_actions(actions, prev_chunk):
 #####################################################################
 # Execution Loop (Polymetis streaming)
 #####################################################################
-def execute_actions_loop(robot: RobotInterface, fps=FPS):
+def execute_actions_loop(robot: RobotInterface, gripper:GripperInterface, fps=FPS):
     """
     Start a non-blocking joint impedance controller and stream targets at `fps`.
     We use update_desired_joint_positions(...) for smooth tracking.
@@ -245,6 +254,9 @@ def execute_actions_loop(robot: RobotInterface, fps=FPS):
     last_closed_time = None
     hold_duration = 5.0  # seconds
 
+    grip_val = 0.04
+    closed = False 
+    
     while True:
         try:
             # Pull new chunk if available
@@ -300,7 +312,14 @@ def execute_actions_loop(robot: RobotInterface, fps=FPS):
 
             # Gripper logic placeholder (keep your original external gripper process)
             # e.g., if using an external gripper bridge: publish grip_val there.
-            # grip_val = float(current_gripper[playhead])
+            grip_val = float(current_gripper[playhead])
+
+            if grip_val <= 0.02:
+                gripper.goto(width=0.0, speed=1.00, force=30.0)
+                closed = True
+            if closed and grip_val >= 0.03:  
+                gripper.goto(width=1.0, speed=1.00, force=30.0)
+                closed = False
 
             playhead += 1
             time.sleep(dt)
@@ -326,6 +345,11 @@ def main(args: ArgsConfig):
         enforce_version=args.enforce_version
     )
 
+
+    gripper = GripperInterface(
+        ip_address="localhost",
+    )
+
     # Quick ping
     s = robot.get_robot_state()
     print("[Polymetis] Connected. Current joints:", np.array(s.joint_positions, dtype=np.float32))
@@ -340,8 +364,8 @@ def main(args: ArgsConfig):
 
     # Threads: fetch & execute
     if args.client:
-        fetch_thread = threading.Thread(target=fetch_actions_loop, args=(args, robot), daemon=True)
-        exec_thread = threading.Thread(target=execute_actions_loop, args=(robot, args.hz), daemon=True)
+        fetch_thread = threading.Thread(target=fetch_actions_loop, args=(args, robot, gripper), daemon=True)
+        exec_thread = threading.Thread(target=execute_actions_loop, args=(robot, gripper, args.hz), daemon=True)
         fetch_thread.start()
         exec_thread.start()
         fetch_thread.join()

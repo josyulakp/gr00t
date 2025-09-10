@@ -148,6 +148,10 @@ def fetch_actions_loop(args):
                     "Pick the bowl and place it in the green square"
                 ],
             }
+            
+            cv2.imwrite("left_image.png", left_img)
+            cv2.imwrite("top_image.png", top_img)
+            cv2.imwrite("wrist_image.png", wrist_img)
 
             # Call server
             actions = gr00t_socket_client_call(obs, args.host, args.port)
