@@ -210,47 +210,97 @@ def get_lipo_actions(actions, prev_chunk):
             smoothed_actions[i] = actions[i, :7]
     return smoothed_actions
 
+########################################################################
+# Temporal Aggregation Utilities
+########################################################################
+
+# Global buffer for temporal aggregation
+MAX_STEPS = 1000       # adjust based on rollout length
+NUM_QUERIES = 8        # how many steps ahead the policy predicts
+STATE_DIM = 7          # number of joints (Franka has 7)
+
+# buffer: shape [MAX_STEPS, MAX_STEPS+NUM_QUERIES, STATE_DIM]
+all_time_actions = np.zeros((MAX_STEPS, MAX_STEPS + NUM_QUERIES, STATE_DIM))
+
+def temporal_aggregate(new_actions: np.ndarray, t: int) -> np.ndarray:
+    """
+    Insert new action predictions into buffer and aggregate actions for step t.
+
+    Args:
+        new_actions: np.ndarray [NUM_QUERIES, STATE_DIM]
+        t: current timestep index
+
+    Returns:
+        Aggregated action for step t (STATE_DIM,)
+    """
+    global all_time_actions
+
+    # Insert predictions into buffer (predicts t...t+NUM_QUERIES-1)
+    horizon = min(NUM_QUERIES, new_actions.shape[0])
+    all_time_actions[t, t:t+horizon, :] = new_actions[:horizon]
+
+    # Extract all predictions from history that target step t
+    actions_for_t = all_time_actions[:, t, :]
+    mask = ~(actions_for_t == 0).all(axis=1)
+    actions_for_t = actions_for_t[mask]
+
+    if actions_for_t.shape[0] == 0:
+        # Fallback to first prediction if no history
+        return new_actions[0]
+
+    # Exponential weights (fresh predictions weigh more)
+    k = 0.01
+    weights = np.exp(-k * np.arange(len(actions_for_t)))
+    weights /= weights.sum()
+
+    agg = (actions_for_t * weights[:, None]).sum(axis=0)
+    return agg
+
+
+########################################################################
+# Executor with Temporal Aggregation
+########################################################################
+
 def execute_actions_loop(fps=30):
-    """Execute actions and allow interleaving using LiPo blending."""
+    """Execute actions with temporal aggregation + gripper handling."""
     dt = 1.0 / fps
     current_chunk = None
     current_gripper = None
     playhead = 0
 
     last_closed_time = None
-    hold_duration = 5.0  # seconds
+    hold_duration = 5.0  # seconds to hold after closing
 
-    if gripper.width / 2 <= 0.03: 
+    # Ensure gripper is open at start
+    if gripper.width / 2 <= 0.03:
         gripper.open(1.0)
+
+    t_global = 0  # global step index (for temporal agg)
 
     while True:
         try:
-            # === Get next chunk if available ===
+            # === Get next action chunk from queue ===
             try:
                 new_chunk = action_queue.get_nowait()
                 new_actions = np.array(new_chunk["action.single_arm"])
                 new_gripper = np.array(new_chunk["action.gripper"])
                 depth_mean = new_chunk.get("depth_mean", 10.0)
+
                 print("gripper ", new_gripper)
 
-                # downsample + smooth
+                # Downsample for speed
                 new_actions = new_actions[::2]
                 new_gripper = new_gripper[::2]
-                new_actions = moving_average_chunk(new_actions, window_size=2)
 
-                if current_chunk is not None:
-                    tail = current_chunk[max(playhead-1, 0):playhead+1]
-                    current_chunk = get_lipo_actions(new_actions, tail)
-                    current_gripper = new_gripper
-                    playhead = 0
-                else:
-                    current_chunk = new_actions
-                    current_gripper = new_gripper
-                    playhead = 0
+                # Reset playhead on new chunk
+                current_chunk = new_actions
+                current_gripper = new_gripper
+                playhead = 0
 
             except queue.Empty:
                 pass
 
+            # Skip if nothing to execute
             if current_chunk is None or current_gripper is None:
                 time.sleep(dt)
                 continue
@@ -258,34 +308,35 @@ def execute_actions_loop(fps=30):
                 time.sleep(dt)
                 continue
 
-            # === Execute one step ===
-            action = current_chunk[playhead]
-            grip_val = current_gripper[playhead]
+            # === Temporal Aggregation ===
+            action_pred_seq = current_chunk[playhead:]
+            action = temporal_aggregate(action_pred_seq, t_global)
 
-            # Move robot joints
-            robot.move(franky.JointMotion(action.tolist()), asynchronous=True)  # blocking here
+            # Execute smoothed joint action
+            robot.move(franky.JointMotion(action.tolist()), asynchronous=True)
 
+            # Gripper logic
+            grip_val = current_gripper[min(playhead, len(current_gripper) - 1)]
             now = time.time()
 
-            # If policy says "close" (gripper < 0.02)
             if grip_val < 0.02 and last_closed_time is None:
                 print(f"[Gripper] CLOSE action detected at playhead={playhead}")
 
-                # Hold at this pose briefly to stabilize
+                # Hold pose briefly
                 time.sleep(0.5)
 
                 # Close gripper
                 gripper.grasp_async(0.0, 1.0, 20.0, epsilon_outer=1.0)
                 last_closed_time = now
-                print("[Gripper] CLOSE triggered at target pose")
+                print("[Gripper] CLOSE triggered")
 
-            # Release after hold_duration
             if last_closed_time is not None and (now - last_closed_time) >= hold_duration:
                 gripper.open(1.0)
                 print("[Gripper] OPEN triggered after hold")
                 last_closed_time = None
 
             playhead += 1
+            t_global += 1
             time.sleep(dt)
 
         except Exception as e:

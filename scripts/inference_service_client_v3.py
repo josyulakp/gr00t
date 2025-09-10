@@ -52,7 +52,7 @@ net_pool = ThreadPoolExecutor(max_workers=2)
 #####################################################################
 robot = franky.Robot("172.16.0.2")
 robot.relative_dynamics_factor = 0.03
-robot.set_collision_behavior([15.0]*7, [30.0]*6)
+robot.set_collision_behavior([30.0]*7, [30.0]*6)
 
 gripper = franky.Gripper("172.16.0.2")
 max_gripper_width = 0.08  # ~80 mm
@@ -485,7 +485,7 @@ def execute_actions_loop(fps=30):
 
             # Trigger closing (if action suggests or depth threshold hit)int(current_gripper.shape[0]/2)
             if (depth_mean <=0.11 or current_gripper[-3:].mean() <= 0.03) and last_closed_time is None:
-                gripper.grasp_async(0.0, 1.0, 20.0, epsilon_outer=1.0)
+                gripper.grasp_async(0.0, 5.0, 30.0, epsilon_outer=0.01)
                 last_closed_time = now
                 print("[Gripper] CLOSE triggered")
 
