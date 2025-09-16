@@ -14,6 +14,7 @@ import franky
 import socket
 import pickle
 import pyrealsense2 as rs
+import collections
 from action_lipo import ActionLiPo
 
 
@@ -269,17 +270,25 @@ def execute_actions_loop(fps=30):
     playhead = 0
 
     last_closed_time = None
-    hold_duration = 5.0  # seconds to hold after closing
+    hold_duration = 5.0
+    start = time.time()
 
     # Ensure gripper is open at start
     if gripper.width / 2 <= 0.03:
         gripper.open(1.0)
 
-    t_global = 0  # global step index (for temporal agg)
+    t_global = 0
+    steps_holded_for = 0
+    closed = False
+
+    # Keep a buffer of last executed actions for hover detection
+    hover_window = 5
+    hover_thresh = 0.002   # rad (tune: smaller means more sensitive)
+    recent_actions = collections.deque(maxlen=hover_window)
 
     while True:
         try:
-            # === Get next action chunk from queue ===
+            # === Get next action chunk ===
             try:
                 new_chunk = action_queue.get_nowait()
                 new_actions = np.array(new_chunk["action.single_arm"])
@@ -288,11 +297,10 @@ def execute_actions_loop(fps=30):
 
                 print("gripper ", new_gripper)
 
-                # Downsample for speed
+                # Downsample
                 new_actions = new_actions[::2]
                 new_gripper = new_gripper[::2]
 
-                # Reset playhead on new chunk
                 current_chunk = new_actions
                 current_gripper = new_gripper
                 playhead = 0
@@ -300,7 +308,6 @@ def execute_actions_loop(fps=30):
             except queue.Empty:
                 pass
 
-            # Skip if nothing to execute
             if current_chunk is None or current_gripper is None:
                 time.sleep(dt)
                 continue
@@ -312,28 +319,44 @@ def execute_actions_loop(fps=30):
             action_pred_seq = current_chunk[playhead:]
             action = temporal_aggregate(action_pred_seq, t_global)
 
-            # Execute smoothed joint action
-            robot.move(franky.JointMotion(action.tolist()), asynchronous=True)
+            # Store for hover detection
+            recent_actions.append(action)
 
             # Gripper logic
             grip_val = current_gripper[min(playhead, len(current_gripper) - 1)]
             now = time.time()
 
-            if grip_val < 0.02 and last_closed_time is None:
+            # --- Hover detection ---
+            hovering = False
+            if len(recent_actions) == hover_window:
+                diffs = [np.linalg.norm(recent_actions[i] - recent_actions[i-1])
+                         for i in range(1, len(recent_actions))]
+                if np.mean(diffs) < hover_thresh:
+                    hovering = True
+                    print("hovering detected")
+
+            print(f"steps {steps_holded_for} closed {closed} hovering {hovering} "
+                  f"time {now-start:.2f} depth {depth_mean:.3f}")
+
+            if (not closed) and ((grip_val < 0.02) or depth_mean <= 0.125 or hovering):
                 print(f"[Gripper] CLOSE action detected at playhead={playhead}")
-
-                # Hold pose briefly
-                time.sleep(0.5)
-
-                # Close gripper
-                gripper.grasp_async(0.0, 1.0, 20.0, epsilon_outer=1.0)
+                gripper.grasp_async(0.0, 5.0, 20.0, epsilon_outer=0.01)
                 last_closed_time = now
+                closed = True
+                steps_holded_for = 0
                 print("[Gripper] CLOSE triggered")
 
-            if last_closed_time is not None and (now - last_closed_time) >= hold_duration:
+            if closed:
+                steps_holded_for += 1
+                robot.move(franky.JointMotion(action.tolist()), asynchronous=False)
+            else:
+                robot.move(franky.JointMotion(action.tolist()), asynchronous=True)
+
+            if closed and steps_holded_for > 30:
                 gripper.open(1.0)
                 print("[Gripper] OPEN triggered after hold")
-                last_closed_time = None
+                steps_holded_for = 0
+                closed = False
 
             playhead += 1
             t_global += 1
